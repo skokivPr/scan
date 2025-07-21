@@ -3,10 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GoogleGenAI } from "@google/genai";
-
 // API Key will be managed through the UI
-let API_KEY = null;
+let API_KEY = ""; // Changed to empty string as per instructions
 
 const imageUpload = document.getElementById('image-upload');
 const sngpsImageUpload = document.getElementById('sngps-image-upload');
@@ -48,7 +46,8 @@ const modalCloseButton = document.getElementById('modal-close-button');
 
 let selectedFile = null;
 let selectedSnGpsFile = null;
-let ai = null;
+// AI client will be initialized within the fetch call or when API_KEY is set.
+// The `GoogleGenAI` library is not used directly here, but a fetch call is used as per instructions.
 
 // Theme constants
 const THEME_KEY = 'themePreference';
@@ -69,20 +68,14 @@ function saveApiKey() {
     localStorage.setItem(API_KEY_STORAGE_KEY, apiKey);
     API_KEY = apiKey;
 
-    // Initialize AI client
-    try {
-        ai = new GoogleGenAI({ apiKey: API_KEY });
-        showApiKeyStatus('API key saved successfully!', 'success');
-        updateUIForApiKey(true);
+    // No direct `new GoogleGenAI` here, as per new instructions to use fetch.
+    showApiKeyStatus('API key saved successfully!', 'success');
+    updateUIForApiKey(true);
 
-        // Close modal after successful save
-        setTimeout(() => {
-            closeApiKeyModal();
-        }, 1500);
-    } catch (error) {
-        showApiKeyStatus('Error initializing AI client', 'error');
-        console.error('Error initializing AI client:', error);
-    }
+    // Close modal after successful save
+    setTimeout(() => {
+        closeApiKeyModal();
+    }, 1500);
 }
 
 function loadApiKey() {
@@ -90,15 +83,8 @@ function loadApiKey() {
     if (savedApiKey) {
         API_KEY = savedApiKey;
         apiKeyInput.value = savedApiKey;
-
-        try {
-            ai = new GoogleGenAI({ apiKey: API_KEY });
-            showApiKeyStatus('API key loaded from storage', 'success');
-            updateUIForApiKey(true);
-        } catch (error) {
-            showApiKeyStatus('Error initializing AI client', 'error');
-            console.error('Error initializing AI client:', error);
-        }
+        showApiKeyStatus('API key loaded from storage', 'success');
+        updateUIForApiKey(true);
     } else {
         updateUIForApiKey(false);
     }
@@ -106,8 +92,7 @@ function loadApiKey() {
 
 function clearApiKey() {
     localStorage.removeItem(API_KEY_STORAGE_KEY);
-    API_KEY = null;
-    ai = null;
+    API_KEY = ""; // Set to empty string
     apiKeyInput.value = '';
     showApiKeyStatus('API key cleared', 'info');
     updateUIForApiKey(false);
@@ -445,7 +430,7 @@ function displayResults(data) {
 
 if (extractButton) {
     extractButton.addEventListener('click', async () => {
-        if (!ai || !API_KEY) {
+        if (!API_KEY) { // Check API_KEY directly
             errorMessage.textContent = "Please enter and save your Google AI API key first.";
             errorMessage.classList.remove('hidden');
             resultText.innerHTML = '';
@@ -472,22 +457,52 @@ if (extractButton) {
         try {
             loadingMessage.textContent = 'Extracting details from main image...';
             const mainImageBase64 = await fileToGenerativePart(selectedFile);
-            const mainImagePart = { inlineData: { mimeType: selectedFile.type, data: mainImageBase64 } };
-
+            
             let mainPromptFields = ["VRID (Vehicle Registration ID)", "Trailer_number (Trailer Number)", "CRID (Consignment Reference ID)"];
             if (!selectedSnGpsFile) {
                 mainPromptFields.push("SerialNumberGPS (Serial Number GPS)");
             }
             const mainText = `Extract the following details from the image: ${mainPromptFields.join(', ')}. For each field, if the detail is not present or clear, return "N/A" as its value. Provide the output strictly in JSON format.`;
-            const textPartMain = { text: mainText };
+            
+            const payloadMain = {
+                contents: [
+                    {
+                        role: "user",
+                        parts: [
+                            { text: mainText },
+                            {
+                                inlineData: {
+                                    mimeType: selectedFile.type,
+                                    data: mainImageBase64
+                                }
+                            }
+                        ]
+                    }
+                ],
+                generationConfig: {
+                    responseMimeType: "application/json"
+                }
+            };
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${API_KEY}`; // Use API_KEY directly
 
             try {
-                const responseMain = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash-preview-04-17',
-                    contents: { parts: [mainImagePart, textPartMain] },
-                    config: { responseMimeType: "application/json" }
+                const responseMain = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payloadMain)
                 });
-                const mainJson = parseGeminiResponse(responseMain.text);
+                const resultMain = await responseMain.json();
+                
+                let mainJson = null;
+                if (resultMain.candidates && resultMain.candidates.length > 0 &&
+                    resultMain.candidates[0].content && resultMain.candidates[0].content.parts &&
+                    resultMain.candidates[0].content.parts.length > 0) {
+                    mainJson = parseGeminiResponse(resultMain.candidates[0].content.parts[0].text);
+                } else {
+                    console.warn("Unexpected response structure from main image API call:", resultMain);
+                    accumulatedErrors.push("Unexpected response from main image API.");
+                }
+
                 if (mainJson) {
                     combinedExtractedData = { ...combinedExtractedData, ...mainJson };
                     if (mainJson._raw_error_text && Object.keys(mainJson).length === 1) accumulatedErrors.push("Main image response could not be parsed as JSON.");
@@ -502,17 +517,46 @@ if (extractButton) {
             if (selectedSnGpsFile) {
                 loadingMessage.textContent = 'Extracting S/N GPS from specific image...';
                 const snGpsImageBase64 = await fileToGenerativePart(selectedSnGpsFile);
-                const snGpsImagePart = { inlineData: { mimeType: selectedSnGpsFile.type, data: snGpsImageBase64 } };
                 const snGpsText = "Extract only SerialNumberGPS (Serial Number GPS) from the image. If not present or clear, return \"N/A\" as its value. Provide the output strictly in JSON format, like {\"SerialNumberGPS\": \"value\"}.";
-                const textPartSnGps = { text: snGpsText };
-
+                
+                const payloadSnGps = {
+                    contents: [
+                        {
+                            role: "user",
+                            parts: [
+                                { text: snGpsText },
+                                {
+                                    inlineData: {
+                                        mimeType: selectedSnGpsFile.type,
+                                        data: snGpsImageBase64
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    generationConfig: {
+                        responseMimeType: "application/json"
+                    }
+                };
+                
                 try {
-                    const responseSnGps = await ai.models.generateContent({
-                        model: 'gemini-2.5-flash-preview-04-17',
-                        contents: { parts: [snGpsImagePart, textPartSnGps] },
-                        config: { responseMimeType: "application/json" }
+                    const responseSnGps = await fetch(apiUrl, { // Reuse apiUrl
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payloadSnGps)
                     });
-                    const snGpsJson = parseGeminiResponse(responseSnGps.text);
+                    const resultSnGps = await responseSnGps.json();
+
+                    let snGpsJson = null;
+                    if (resultSnGps.candidates && resultSnGps.candidates.length > 0 &&
+                        resultSnGps.candidates[0].content && resultSnGps.candidates[0].content.parts &&
+                        resultSnGps.candidates[0].content.parts.length > 0) {
+                        snGpsJson = parseGeminiResponse(resultSnGps.candidates[0].content.parts[0].text);
+                    } else {
+                        console.warn("Unexpected response structure from S/N GPS image API call:", resultSnGps);
+                        accumulatedErrors.push("Unexpected response from S/N GPS image API.");
+                    }
+
                     if (snGpsJson) {
                         if (snGpsJson.SerialNumberGPS !== undefined) {
                             combinedExtractedData.SerialNumberGPS = snGpsJson.SerialNumberGPS;
@@ -628,7 +672,13 @@ if (copyTextButton) {
         }
 
         try {
-            await navigator.clipboard.writeText(textToCopy);
+            // Using document.execCommand('copy') for clipboard operations due to potential iframe restrictions
+            const textarea = document.createElement('textarea');
+            textarea.value = textToCopy;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
             showCopiedFeedback(copyTextButton);
         } catch (err) {
             console.error('Failed to copy text: ', err);
@@ -686,7 +736,13 @@ if (copyMarkdownButton) {
         }
 
         try {
-            await navigator.clipboard.writeText(markdownToCopy);
+            // Using document.execCommand('copy') for clipboard operations due to potential iframe restrictions
+            const textarea = document.createElement('textarea');
+            textarea.value = markdownToCopy;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
             showCopiedFeedback(copyMarkdownButton);
         } catch (err) {
             console.error('Failed to copy Markdown: ', err);
