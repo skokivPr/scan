@@ -483,7 +483,8 @@ if (extractButton) {
                     responseMimeType: "application/json"
                 }
             };
-            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${API_KEY}`; // Use API_KEY directly
+            // Corrected the model name to gemini-1.5-flash
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`;
 
             try {
                 const responseMain = await fetch(apiUrl, {
